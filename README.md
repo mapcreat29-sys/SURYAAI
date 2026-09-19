@@ -1,1 +1,1 @@
-# SURYAAI
+# surya-ai
