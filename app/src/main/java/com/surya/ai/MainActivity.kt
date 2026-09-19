@@ -1,46 +1,45 @@
-package com.surya.ai
 
+    package com.surya.ai
+
+import android.Manifest
 import android.content.Intent
 import android.content.pm.PackageManager
+import android.os.Build
 import android.os.Bundle
 import android.provider.Settings
-import android.speech.RecognizerIntent
 import android.view.Gravity
 import android.widget.Button
 import android.widget.EditText
 import android.widget.LinearLayout
+import android.widget.ScrollView
 import android.widget.TextView
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.appcompat.app.AppCompatActivity
-import java.util.Locale
+import androidx.appcompat.widget.SwitchCompat
+import androidx.core.content.ContextCompat
 
 class MainActivity : AppCompatActivity() {
 
+    private lateinit var status: TextView
     private lateinit var output: TextView
     private lateinit var input: EditText
-    private val needAcc = "पहले नीचे वाला बटन दबाकर सूर्या को Accessibility में चालू करो"
+    private lateinit var toggle: SwitchCompat
+    private var ignoreToggle = false
 
-    private val aliases = mapOf(
-        "यूट्यूब" to "youtube",
-        "इंस्टाग्राम" to "instagram",
-        "व्हाट्सएप" to "whatsapp",
-        "व्हाट्सऐप" to "whatsapp",
-        "वॉट्सएप" to "whatsapp",
-        "क्रोम" to "chrome",
-        "कैमरा" to "camera",
-        "गैलरी" to "gallery",
-        "फोन" to "phone"
-    )
+    private val prefs by lazy { getSharedPreferences("surya", MODE_PRIVATE) }
 
-    private val voiceLauncher = registerForActivityResult(
-        ActivityResultContracts.StartActivityForResult()
-    ) { result ->
-        val list = result.data?.getStringArrayListExtra(RecognizerIntent.EXTRA_RESULTS)
-        val spoken = list?.firstOrNull()
-        if (!spoken.isNullOrBlank()) {
-            input.setText(spoken)
-            runCommand(spoken)
+    private val permLauncher = registerForActivityResult(
+        ActivityResultContracts.RequestMultiplePermissions()
+    ) { _ ->
+        if (hasMic()) {
+            prefs.edit().putBoolean("on", true).apply()
+            startListening()
+        } else {
+            setToggle(false)
+            prefs.edit().putBoolean("on", false).apply()
+            output.text = "माइक की इजाज़त ज़रूरी है"
         }
+        refresh()
     }
 
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -56,16 +55,24 @@ class MainActivity : AppCompatActivity() {
         title.textSize = 28f
         title.gravity = Gravity.CENTER
 
-        input = EditText(this)
-        input.hint = "कमांड लिखो, जैसे: यूट्यूब खोलो"
+        status = TextView(this)
+        status.textSize = 15f
+        status.setPadding(0, pad, 0, pad)
 
-        val sendBtn = Button(this)
-        sendBtn.text = "भेजो"
-        sendBtn.setOnClickListener { runCommand(input.text.toString()) }
+        toggle = SwitchCompat(this)
+        toggle.text = "सूर्या सुनना: ON / OFF"
+        toggle.textSize = 18f
+        toggle.isChecked = prefs.getBoolean("on", false)
+        toggle.setOnCheckedChangeListener { _, checked ->
+            if (!ignoreToggle) {
+                if (checked) turnOn() else turnOff()
+            }
+        }
 
-        val micBtn = Button(this)
-        micBtn.text = "🎤 बोलो"
-        micBtn.setOnClickListener { listen() }
+        val hint = TextView(this)
+        hint.text = "फ़ोन अनलॉक होने पर बोलो: RDX सूर्या, यूट्यूब खोलो / हे सूर्या, कॉल मम्मी"
+        hint.textSize = 14f
+        hint.setPadding(0, pad, 0, pad)
 
         val accBtn = Button(this)
         accBtn.text = "फ़ोन कंट्रोल चालू करो (Accessibility)"
@@ -73,99 +80,96 @@ class MainActivity : AppCompatActivity() {
             startActivity(Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS))
         }
 
+        val batBtn = Button(this)
+        batBtn.text = "बैटरी: सूर्या को Unrestricted करो"
+        batBtn.setOnClickListener {
+            startActivity(Intent(Settings.ACTION_IGNORE_BATTERY_OPTIMIZATION_SETTINGS))
+        }
+
+        input = EditText(this)
+        input.hint = "टेस्ट के लिए कमांड लिखो, जैसे: यूट्यूब खोलो"
+
+        val sendBtn = Button(this)
+        sendBtn.text = "भेजो"
+        sendBtn.setOnClickListener {
+            output.text = SmartCommands.run(this, input.text.toString())
+        }
+
         output = TextView(this)
         output.textSize = 16f
         output.setPadding(0, pad, 0, 0)
 
         root.addView(title)
+        root.addView(status)
+        root.addView(toggle)
+        root.addView(hint)
+        root.addView(accBtn)
+        root.addView(batBtn)
         root.addView(input)
         root.addView(sendBtn)
-        root.addView(micBtn)
-        root.addView(accBtn)
         root.addView(output)
-        setContentView(root)
+
+        val scroll = ScrollView(this)
+        scroll.addView(root)
+        setContentView(scroll)
     }
 
-    private fun say(msg: String) {
-        output.text = msg
+    override fun onResume() {
+        super.onResume()
+        if (prefs.getBoolean("on", false) && hasMic() && !ListenService.running) {
+            startListening()
+        }
+        refresh()
     }
 
-    private fun listen() {
-        val i = Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH)
-        i.putExtra(RecognizerIntent.EXTRA_LANGUAGE_MODEL, RecognizerIntent.LANGUAGE_MODEL_FREE_FORM)
-        i.putExtra(RecognizerIntent.EXTRA_LANGUAGE, "hi-IN")
-        i.putExtra(RecognizerIntent.EXTRA_PROMPT, "बोलिए...")
-        try {
-            voiceLauncher.launch(i)
-        } catch (e: Exception) {
-            say("इस फ़ोन में आवाज़ की सुविधा नहीं मिली")
+    private fun hasMic(): Boolean {
+        return ContextCompat.checkSelfPermission(this, Manifest.permission.RECORD_AUDIO) ==
+            PackageManager.PERMISSION_GRANTED
+    }
+
+    private fun setToggle(v: Boolean) {
+        ignoreToggle = true
+        toggle.isChecked = v
+        ignoreToggle = false
+    }
+
+    private fun turnOn() {
+        val need = mutableListOf(
+            Manifest.permission.RECORD_AUDIO,
+            Manifest.permission.CALL_PHONE,
+            Manifest.permission.READ_CONTACTS
+        )
+        if (Build.VERSION.SDK_INT >= 33) need.add(Manifest.permission.POST_NOTIFICATIONS)
+        val missing = need.filter {
+            ContextCompat.checkSelfPermission(this, it) != PackageManager.PERMISSION_GRANTED
+        }
+        if (missing.isEmpty()) {
+            prefs.edit().putBoolean("on", true).apply()
+            startListening()
+            refresh()
+        } else {
+            permLauncher.launch(missing.toTypedArray())
         }
     }
 
-    private fun runCommand(raw: String) {
-        val t = raw.lowercase(Locale.getDefault()).trim()
-        if (t.isEmpty()) return
-        val svc = SuryaService.instance
+    private fun turnOff() {
+        prefs.edit().putBoolean("on", false).apply()
+        stopService(Intent(this, ListenService::class.java))
+        SuryaService.instance?.hideBox()
+        refresh()
+    }
 
-        when {
-            t.contains("unlock") || t.contains("अनलॉक") ->
-                say("सुरक्षा की वजह से मैं फ़ोन अनलॉक नहीं कर सकता")
-
-            t.contains("lock") || t.contains("लॉक") -> {
-                if (svc == null) say(needAcc)
-                else say(if (svc.lock()) "फ़ोन लॉक कर रहा हूँ" else "लॉक नहीं हो पाया")
-            }
-
-            t.contains("home") || t.contains("होम") -> {
-                if (svc == null) say(needAcc) else { svc.home(); say("होम स्क्रीन") }
-            }
-
-            t.contains("back") || t.contains("पीछे") -> {
-                if (svc == null) say(needAcc) else { svc.back(); say("पीछे गया") }
-            }
-
-            t.contains("wifi") || t.contains("वाईफाई") || t.contains("वाई-फाई") -> {
-                startActivity(Intent(Settings.ACTION_WIFI_SETTINGS))
-                say("वाई-फाई सेटिंग खोल रहा हूँ")
-            }
-
-            t.contains("bluetooth") || t.contains("ब्लूटूथ") -> {
-                startActivity(Intent(Settings.ACTION_BLUETOOTH_SETTINGS))
-                say("ब्लूटूथ सेटिंग खोल रहा हूँ")
-            }
-
-            t.contains("setting") || t.contains("सेटिंग") -> {
-                startActivity(Intent(Settings.ACTION_SETTINGS))
-                say("सेटिंग खोल रहा हूँ")
-            }
-
-            t.contains("open") || t.contains("ओपन") || t.contains("खोल") -> {
-                var name = t
-                for (w in listOf("open", "ओपन", "खोलिए", "खोलो", "खोल", "करो", "please")) {
-                    name = name.replace(w, " ")
-                }
-                name = name.trim()
-                for ((h, e) in aliases) {
-                    if (name.contains(h)) name = e
-                }
-                if (name.isNotEmpty() && openApp(name)) say("खोल रहा हूँ: $name")
-                else say("ऐप नहीं मिला: $name")
-            }
-
-            else -> say("समझ नहीं आया। कोशिश करो: यूट्यूब खोलो, वाईफाई, होम, लॉक")
+    private fun startListening() {
+        if (!ListenService.running) {
+            ContextCompat.startForegroundService(this, Intent(this, ListenService::class.java))
         }
     }
 
-    private fun openApp(query: String): Boolean {
-        val pm = packageManager
-        val apps = pm.getInstalledApplications(PackageManager.GET_META_DATA)
-        val match = apps.firstOrNull {
-            pm.getLaunchIntentForPackage(it.packageName) != null &&
-                pm.getApplicationLabel(it).toString().lowercase().contains(query)
-        } ?: return false
-        val intent = pm.getLaunchIntentForPackage(match.packageName) ?: return false
-        intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-        startActivity(intent)
-        return true
+    private fun refresh() {
+        val on = prefs.getBoolean("on", false)
+        val acc = SuryaService.instance != null
+        val s1 = if (on) "चालू ✅" else "बंद ⛔"
+        val s2 = if (acc) "चालू ✅" else "बंद ⛔ (नीचे का बटन दबाकर चालू करो)"
+        status.text = "सुनना: $s1\nफ़ोन कंट्रोल: $s2"
     }
 }
