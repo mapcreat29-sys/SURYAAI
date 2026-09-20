@@ -1,16 +1,20 @@
-
-    package com.surya.ai
+package com.surya.ai
 
 import android.Manifest
 import android.content.Intent
 import android.content.pm.PackageManager
 import android.os.Build
 import android.os.Bundle
+import android.os.Handler
+import android.os.Looper
 import android.provider.Settings
 import android.view.Gravity
+import android.view.View
 import android.widget.Button
 import android.widget.EditText
 import android.widget.LinearLayout
+import android.widget.RadioButton
+import android.widget.RadioGroup
 import android.widget.ScrollView
 import android.widget.TextView
 import androidx.activity.result.contract.ActivityResultContracts
@@ -26,7 +30,17 @@ class MainActivity : AppCompatActivity() {
     private lateinit var toggle: SwitchCompat
     private var ignoreToggle = false
 
+    private val ui = Handler(Looper.getMainLooper())
+    private val tick = object : Runnable {
+        override fun run() {
+            refresh()
+            ui.postDelayed(this, 1000)
+        }
+    }
+
     private val prefs by lazy { getSharedPreferences("surya", MODE_PRIVATE) }
+
+    private fun tr(hi: String, en: String): String = Lang.t(this, hi, en)
 
     private val permLauncher = registerForActivityResult(
         ActivityResultContracts.RequestMultiplePermissions()
@@ -37,7 +51,7 @@ class MainActivity : AppCompatActivity() {
         } else {
             setToggle(false)
             prefs.edit().putBoolean("on", false).apply()
-            output.text = "माइक की इजाज़त ज़रूरी है"
+            output.text = tr("माइक की इजाज़त ज़रूरी है", "Microphone permission is required")
         }
         refresh()
     }
@@ -51,16 +65,38 @@ class MainActivity : AppCompatActivity() {
         root.setPadding(pad, pad * 2, pad, pad)
 
         val title = TextView(this)
-        title.text = "सूर्या AI"
+        title.text = tr("सूर्या AI", "Surya AI")
         title.textSize = 28f
         title.gravity = Gravity.CENTER
+
+        val langLabel = TextView(this)
+        langLabel.text = "भाषा / Language"
+        langLabel.textSize = 15f
+        langLabel.setPadding(0, pad, 0, 0)
+
+        val langGroup = RadioGroup(this)
+        langGroup.orientation = RadioGroup.HORIZONTAL
+        val rbHi = RadioButton(this)
+        rbHi.text = "हिंदी"
+        rbHi.id = View.generateViewId()
+        val rbEn = RadioButton(this)
+        rbEn.text = "English"
+        rbEn.id = View.generateViewId()
+        langGroup.addView(rbHi)
+        langGroup.addView(rbEn)
+        if (Lang.isHindi(this)) rbHi.isChecked = true else rbEn.isChecked = true
+        langGroup.setOnCheckedChangeListener { _, id ->
+            val code = if (id == rbEn.id) "en" else "hi"
+            val cur = if (Lang.isHindi(this)) "hi" else "en"
+            if (code != cur) changeLanguage(code)
+        }
 
         status = TextView(this)
         status.textSize = 15f
         status.setPadding(0, pad, 0, pad)
 
         toggle = SwitchCompat(this)
-        toggle.text = "सूर्या सुनना: ON / OFF"
+        toggle.text = tr("सूर्या सुनना: ON / OFF", "Surya listening: ON / OFF")
         toggle.textSize = 18f
         toggle.isChecked = prefs.getBoolean("on", false)
         toggle.setOnCheckedChangeListener { _, checked ->
@@ -70,27 +106,39 @@ class MainActivity : AppCompatActivity() {
         }
 
         val hint = TextView(this)
-        hint.text = "फ़ोन अनलॉक होने पर बोलो: RDX सूर्या, यूट्यूब खोलो / हे सूर्या, कॉल मम्मी"
+        hint.text = tr(
+            "फ़ोन अनलॉक होने पर बोलो: हे सूर्या / RDX सूर्या, फिर: यूट्यूब खोलो या कॉल मम्मी",
+            "With the phone unlocked, say: Hey Surya / RDX Surya, then: Open YouTube or Call Mom"
+        )
         hint.textSize = 14f
         hint.setPadding(0, pad, 0, pad)
 
         val accBtn = Button(this)
-        accBtn.text = "फ़ोन कंट्रोल चालू करो (Accessibility)"
+        accBtn.text = tr(
+            "फ़ोन कंट्रोल चालू करो (Accessibility)",
+            "Turn on phone control (Accessibility)"
+        )
         accBtn.setOnClickListener {
             startActivity(Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS))
         }
 
         val batBtn = Button(this)
-        batBtn.text = "बैटरी: सूर्या को Unrestricted करो"
+        batBtn.text = tr(
+            "बैटरी: सूर्या को Unrestricted करो",
+            "Battery: set Surya to Unrestricted"
+        )
         batBtn.setOnClickListener {
             startActivity(Intent(Settings.ACTION_IGNORE_BATTERY_OPTIMIZATION_SETTINGS))
         }
 
         input = EditText(this)
-        input.hint = "टेस्ट के लिए कमांड लिखो, जैसे: यूट्यूब खोलो"
+        input.hint = tr(
+            "टेस्ट के लिए कमांड लिखो, जैसे: यूट्यूब खोलो",
+            "Type a command to test, e.g. open YouTube"
+        )
 
         val sendBtn = Button(this)
-        sendBtn.text = "भेजो"
+        sendBtn.text = tr("भेजो", "Send")
         sendBtn.setOnClickListener {
             output.text = SmartCommands.run(this, input.text.toString())
         }
@@ -100,6 +148,8 @@ class MainActivity : AppCompatActivity() {
         output.setPadding(0, pad, 0, 0)
 
         root.addView(title)
+        root.addView(langLabel)
+        root.addView(langGroup)
         root.addView(status)
         root.addView(toggle)
         root.addView(hint)
@@ -120,6 +170,28 @@ class MainActivity : AppCompatActivity() {
             startListening()
         }
         refresh()
+        ui.removeCallbacks(tick)
+        ui.postDelayed(tick, 1000)
+    }
+
+    override fun onPause() {
+        super.onPause()
+        ui.removeCallbacks(tick)
+    }
+
+    private fun changeLanguage(code: String) {
+        Lang.set(this, code)
+        val app = applicationContext
+        if (ListenService.running) {
+            stopService(Intent(app, ListenService::class.java))
+            Handler(Looper.getMainLooper()).postDelayed({
+                val on = app.getSharedPreferences("surya", MODE_PRIVATE).getBoolean("on", false)
+                if (on) {
+                    ContextCompat.startForegroundService(app, Intent(app, ListenService::class.java))
+                }
+            }, 900)
+        }
+        recreate()
     }
 
     private fun hasMic(): Boolean {
@@ -168,8 +240,15 @@ class MainActivity : AppCompatActivity() {
     private fun refresh() {
         val on = prefs.getBoolean("on", false)
         val acc = SuryaService.instance != null
-        val s1 = if (on) "चालू ✅" else "बंद ⛔"
-        val s2 = if (acc) "चालू ✅" else "बंद ⛔ (नीचे का बटन दबाकर चालू करो)"
-        status.text = "सुनना: $s1\nफ़ोन कंट्रोल: $s2"
+        val onTxt = if (on) tr("चालू ✅", "On ✅") else tr("बंद ⛔", "Off ⛔")
+        val accTxt = if (acc) tr("चालू ✅", "On ✅")
+        else tr("बंद ⛔ (नीचे का बटन दबाकर चालू करो)", "Off ⛔ (tap the button below to turn it on)")
+        var text = tr(
+            "सुनना: $onTxt\nफ़ोन कंट्रोल: $accTxt",
+            "Listening: $onTxt\nPhone control: $accTxt"
+        )
+        val p = ListenService.progress
+        if (p.isNotEmpty()) text += "\n\n$p"
+        status.text = text
     }
 }
