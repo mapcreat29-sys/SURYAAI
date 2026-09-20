@@ -574,4 +574,75 @@ class ListenService : Service() {
         destroyRecognizer()
         val r = SpeechRecognizer.createSpeechRecognizer(this)
         r.setRecognitionListener(commandListener)
-        val hindi = L
+        val hindi = Lang.isHindi(this)
+        val i = Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH)
+        i.putExtra(RecognizerIntent.EXTRA_LANGUAGE_MODEL, RecognizerIntent.LANGUAGE_MODEL_FREE_FORM)
+        i.putExtra(RecognizerIntent.EXTRA_LANGUAGE, if (hindi) "hi-IN" else "en-IN")
+        i.putExtra(
+            "android.speech.extra.EXTRA_ADDITIONAL_LANGUAGES",
+            arrayOf(if (hindi) "en-IN" else "hi-IN")
+        )
+        i.putExtra(RecognizerIntent.EXTRA_MAX_RESULTS, 3)
+        i.putExtra(RecognizerIntent.EXTRA_CALLING_PACKAGE, packageName)
+        recognizer = r
+        r.startListening(i)
+        handler.removeCallbacks(commandTimeout)
+        handler.postDelayed(commandTimeout, 12000)
+    }
+
+    private fun destroyRecognizer() {
+        try {
+            recognizer?.cancel()
+        } catch (e: Exception) {
+        }
+        try {
+            recognizer?.destroy()
+        } catch (e: Exception) {
+        }
+        recognizer = null
+    }
+
+    private fun finishCommandListening(delay: Long) {
+        awaitingCommand = false
+        handler.removeCallbacks(commandTimeout)
+        destroyRecognizer()
+        handler.removeCallbacks(startRunnable)
+        handler.postDelayed(startRunnable, delay)
+    }
+
+    private val commandListener = object : RecognitionListener {
+        override fun onReadyForSpeech(params: Bundle?) {}
+        override fun onBeginningOfSpeech() {}
+        override fun onRmsChanged(rmsdB: Float) {}
+        override fun onBufferReceived(buffer: ByteArray?) {}
+        override fun onEndOfSpeech() {}
+        override fun onPartialResults(partialResults: Bundle?) {}
+        override fun onEvent(eventType: Int, params: Bundle?) {}
+
+        override fun onError(error: Int) {
+            SuryaService.instance?.hideBox()
+            if (error == SpeechRecognizer.ERROR_INSUFFICIENT_PERMISSIONS) {
+                wantListening = false
+                awaitingCommand = false
+                handler.removeCallbacks(commandTimeout)
+                say(tr("माइक की इजाज़त चाहिए", "Microphone permission is needed"), 3000)
+                return
+            }
+            finishCommandListening(1200)
+        }
+
+        override fun onResults(results: Bundle?) {
+            val list = results?.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION)
+            val command = list?.firstOrNull()?.lowercase(Locale.getDefault())?.trim()
+            awaitingCommand = false
+            handler.removeCallbacks(commandTimeout)
+            destroyRecognizer()
+            if (command.isNullOrEmpty()) {
+                SuryaService.instance?.hideBox()
+                handler.postDelayed(startRunnable, 800)
+            } else {
+                runCommand(command, allowRetry = false)
+            }
+        }
+    }
+}
