@@ -45,14 +45,13 @@ class ListenService : Service() {
         private const val MODEL_NAME = "vosk-model-small-hi-0.22"
         private const val MODEL_URL = "https://alphacephei.com/vosk/models/$MODEL_NAME.zip"
         private const val SAMPLE_RATE = 16000
+        private const val DEBUG = true
     }
 
     private val handler = Handler(Looper.getMainLooper())
 
-    // Android का आवाज़ पहचानने वाला (टिंग के साथ) - सिर्फ़ "हे सूर्य" के बाद कमांड सुनने के लिए
     private var recognizer: SpeechRecognizer? = null
 
-    // Vosk (ऑफ़लाइन, बिना आवाज़ के) - लगातार "हे सूर्य" सुनने के लिए
     @Volatile private var model: Model? = null
     @Volatile private var modelLoading = false
     @Volatile private var voskRunning = false
@@ -62,7 +61,6 @@ class ListenService : Service() {
     private var awaitingCommand = false
 
     private val wakeA = Regex("(rdx|आर\\s*डी\\s*एक्स|आरडीएक्स)\\s*(surya|सूर्या|सूर्य|सुर्या|सुर्य)?")
-    private val wakeB = Regex("(hey|hay|हे|हेय)\\s*(surya|सूर्या|सूर्य|सुर्या|सुर्य)")
 
     private val startRunnable = Runnable { startVosk() }
 
@@ -161,12 +159,57 @@ class ListenService : Service() {
         handler.post { say(msg, ms) }
     }
 
-    // ---------------- Vosk: चुपचाप "हे सूर्य" सुनना ----------------
+    // ---------------- "सूर्य" जैसे शब्द पहचानना ----------------
+
+    private fun skeleton(s: String): String {
+        val sb = StringBuilder()
+        for (ch in s.lowercase(Locale.getDefault())) {
+            val m: Char? = when (ch) {
+                'क', 'ख', 'च', 'छ', 'c', 'q', 'k' -> 'k'
+                'ग', 'घ', 'g' -> 'g'
+                'ज', 'झ', 'j', 'z' -> 'j'
+                'ट', 'ठ', 'ड', 'ढ', 'त', 'थ', 'द', 'ध', 't', 'd' -> 't'
+                'न', 'ण', 'ं', 'ँ', 'n' -> 'n'
+                'प', 'फ', 'p', 'f' -> 'p'
+                'ब', 'भ', 'b' -> 'b'
+                'म', 'm' -> 'm'
+                'य', 'y' -> 'y'
+                'र', 'r' -> 'r'
+                'ल', 'l' -> 'l'
+                'व', 'w', 'v' -> 'v'
+                'श', 'ष', 'स', 's' -> 's'
+                else -> null
+            }
+            if (m != null && (sb.isEmpty() || sb.last() != m)) sb.append(m)
+        }
+        return sb.toString()
+    }
+
+    private fun splitWords(text: String): List<String> =
+        text.lowercase(Locale.getDefault()).trim().split(Regex("\\s+")).filter { it.isNotEmpty() }
+
+    private fun suryaIndex(words: List<String>): Int {
+        for (i in words.indices) {
+            val sk = skeleton(words[i])
+            if (sk == "sry" || sk == "srj") return i
+        }
+        return -1
+    }
 
     private fun isWake(text: String): Boolean {
         val t = text.lowercase(Locale.getDefault())
-        return wakeA.containsMatchIn(t) || wakeB.containsMatchIn(t)
+        return suryaIndex(splitWords(t)) >= 0 || wakeA.containsMatchIn(t)
     }
+
+    private fun extractCommand(text: String): String {
+        val t = text.lowercase(Locale.getDefault()).trim()
+        val words = splitWords(t)
+        val idx = suryaIndex(words)
+        if (idx >= 0) return words.drop(idx + 1).joinToString(" ").trim()
+        return t.replace(wakeA, " ").trim()
+    }
+
+    // ---------------- Vosk: चुपचाप "हे सूर्य" सुनना ----------------
 
     private fun startVosk() {
         if (!wantListening || voskRunning || awaitingCommand) return
@@ -210,15 +253,28 @@ class ListenService : Service() {
             rec.startRecording()
 
             val buf = ShortArray(2048)
+            var wakeAt = 0L
             while (wantListening) {
                 val n = rec.read(buf, 0, buf.size)
                 if (n < 0) break
                 if (n == 0) continue
                 if (rc.acceptWaveForm(buf, n)) {
                     val text = JSONObject(rc.result).optString("text")
+                    if (DEBUG && text.isNotBlank()) sayFromAnyThread("सुना: $text", 2500)
                     if (text.isNotBlank() && isWake(text)) {
                         heard = text
                         break
+                    }
+                    wakeAt = 0L
+                } else {
+                    val p = JSONObject(rc.partialResult).optString("partial")
+                    if (p.isNotBlank() && isWake(p)) {
+                        val now = System.currentTimeMillis()
+                        if (wakeAt == 0L) wakeAt = now
+                        if (now - wakeAt > 1200) {
+                            heard = p
+                            break
+                        }
                     }
                 }
             }
@@ -312,8 +368,7 @@ class ListenService : Service() {
 
     private fun onWake(text: String) {
         if (!wantListening) return
-        val t = text.lowercase(Locale.getDefault())
-        val command = t.replace(wakeA, " ").replace(wakeB, " ").trim()
+        val command = extractCommand(text)
         if (command.isEmpty()) {
             listenForCommand()
         } else {
@@ -329,7 +384,6 @@ class ListenService : Service() {
             "कुछ गड़बड़ हो गई"
         }
         if (allowRetry && (reply == "समझ नहीं आया" || reply.startsWith("ऐप नहीं मिला"))) {
-            // Vosk ने शायद कमांड ग़लत सुना - Android की आवाज़ पहचान से एक बार फिर सुनते हैं
             listenForCommand()
             return
         }
@@ -413,4 +467,4 @@ class ListenService : Service() {
             }
         }
     }
-}           
+}
