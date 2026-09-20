@@ -42,17 +42,17 @@ class ListenService : Service() {
         var running = false
         private const val CHANNEL = "surya_listen"
         private const val NOTIF_ID = 42
-        private const val MODEL_NAME = "vosk-model-small-hi-0.22"
-        private const val MODEL_URL = "https://alphacephei.com/vosk/models/$MODEL_NAME.zip"
+        private const val HI_MODEL = "vosk-model-small-hi-0.22"
+        private const val EN_MODEL = "vosk-model-small-en-us-0.15"
+        private const val MODEL_BASE = "https://alphacephei.com/vosk/models/"
         private const val SAMPLE_RATE = 16000
-        private const val DEBUG = true
     }
 
     private val handler = Handler(Looper.getMainLooper())
 
     private var recognizer: SpeechRecognizer? = null
 
-    @Volatile private var model: Model? = null
+    @Volatile private var models: List<Model> = emptyList()
     @Volatile private var modelLoading = false
     @Volatile private var voskRunning = false
     private var voskThread: Thread? = null
@@ -60,9 +60,17 @@ class ListenService : Service() {
     @Volatile private var wantListening = false
     private var awaitingCommand = false
 
-    private val wakeA = Regex("(rdx|आर\\s*डी\\s*एक्स|आरडीएक्स)\\s*(surya|सूर्या|सूर्य|सुर्या|सुर्य)?")
+    private val heyWords = setOf("hey", "hay", "hi", "he", "हे", "हेय", "है", "हैय")
+    private val rdxWords = setOf("rdx", "rdex", "आरडीएक्स", "आरडीक्स", "अरडीएक्स")
 
     private val startRunnable = Runnable { startVosk() }
+
+    private val commandTimeout = Runnable {
+        if (awaitingCommand) {
+            SuryaService.instance?.hideBox()
+            finishCommandListening(500)
+        }
+    }
 
     private val screenReceiver = object : BroadcastReceiver() {
         override fun onReceive(context: Context?, intent: Intent?) {
@@ -83,7 +91,7 @@ class ListenService : Service() {
         )
         val n: Notification = Notification.Builder(this, CHANNEL)
             .setContentTitle("सूर्या AI चालू है")
-            .setContentText("फ़ोन अनलॉक होने पर \"हे सूर्य\" सुन रहा है")
+            .setContentText("फ़ोन अनलॉक होने पर \"हे सूर्य\" / \"Hey Surya\" सुन रहा है")
             .setSmallIcon(android.R.drawable.ic_btn_speak_now)
             .setOngoing(true)
             .build()
@@ -123,11 +131,13 @@ class ListenService : Service() {
         } catch (e: Exception) {
         }
         if (voskThread?.isAlive != true) {
-            try {
-                model?.close()
-            } catch (e: Exception) {
+            for (m in models) {
+                try {
+                    m.close()
+                } catch (e: Exception) {
+                }
             }
-            model = null
+            models = emptyList()
         }
         SuryaService.instance?.hideBox()
         super.onDestroy()
@@ -159,7 +169,7 @@ class ListenService : Service() {
         handler.post { say(msg, ms) }
     }
 
-    // ---------------- "सूर्य" जैसे शब्द पहचानना ----------------
+    // ---------------- वेक फ़्रेज़ पहचानना: "हे/hey/RDX" + "सूर्य/सूरज/surya" ----------------
 
     private fun skeleton(s: String): String {
         val sb = StringBuilder()
@@ -188,28 +198,46 @@ class ListenService : Service() {
     private fun splitWords(text: String): List<String> =
         text.lowercase(Locale.getDefault()).trim().split(Regex("\\s+")).filter { it.isNotEmpty() }
 
-    private fun suryaIndex(words: List<String>): Int {
+    private fun isSuryaWord(w: String): Boolean {
+        val sk = skeleton(w)
+        return sk == "sry" || sk == "srj"
+    }
+
+    private fun suryaLen(words: List<String>, j: Int): Int {
+        if (j >= words.size) return 0
+        if (isSuryaWord(words[j])) return 1
+        if (j + 1 < words.size && isSuryaWord(words[j] + words[j + 1])) return 2
+        return 0
+    }
+
+    // वेक फ़्रेज़ मिले तो उसके बाद वाले शब्द का नंबर लौटाता है, नहीं मिले तो -1
+    private fun findWake(text: String): Int {
+        val words = splitWords(text)
         for (i in words.indices) {
-            val sk = skeleton(words[i])
-            if (sk == "sry" || sk == "srj") return i
+            if (words[i] in heyWords) {
+                val n = suryaLen(words, i + 1)
+                if (n > 0) return i + 1 + n
+            }
+            for (len in 1..3) {
+                if (i + len > words.size) break
+                val joined = words.subList(i, i + len).joinToString("")
+                if (joined in rdxWords) {
+                    val n = suryaLen(words, i + len)
+                    if (n > 0) return i + len + n
+                }
+            }
         }
         return -1
     }
 
-    private fun isWake(text: String): Boolean {
-        val t = text.lowercase(Locale.getDefault())
-        return suryaIndex(splitWords(t)) >= 0 || wakeA.containsMatchIn(t)
-    }
-
     private fun extractCommand(text: String): String {
-        val t = text.lowercase(Locale.getDefault()).trim()
-        val words = splitWords(t)
-        val idx = suryaIndex(words)
-        if (idx >= 0) return words.drop(idx + 1).joinToString(" ").trim()
-        return t.replace(wakeA, " ").trim()
+        val words = splitWords(text)
+        val idx = findWake(text)
+        if (idx < 0) return ""
+        return words.drop(idx).joinToString(" ").trim()
     }
 
-    // ---------------- Vosk: चुपचाप "हे सूर्य" सुनना ----------------
+    // ---------------- Vosk: चुपचाप सुनना (हिंदी + अंग्रेज़ी) ----------------
 
     private fun startVosk() {
         if (!wantListening || voskRunning || awaitingCommand) return
@@ -221,19 +249,19 @@ class ListenService : Service() {
             return
         }
 
-        val m = model
-        if (m == null) {
+        val list = models
+        if (list.isEmpty()) {
             loadModelAsync()
             return
         }
 
         voskRunning = true
-        voskThread = thread(name = "surya-vosk") { voskLoop(m) }
+        voskThread = thread(name = "surya-vosk") { voskLoop(list) }
     }
 
-    private fun voskLoop(m: Model) {
+    private fun voskLoop(list: List<Model>) {
         var rec: AudioRecord? = null
-        var rc: Recognizer? = null
+        var recs: List<Recognizer> = emptyList()
         var heard: String? = null
         try {
             val minBuf = AudioRecord.getMinBufferSize(
@@ -249,29 +277,33 @@ class ListenService : Service() {
             )
             if (rec.state != AudioRecord.STATE_INITIALIZED) throw IllegalStateException("mic busy")
 
-            rc = Recognizer(m, SAMPLE_RATE.toFloat())
+            recs = list.map { Recognizer(it, SAMPLE_RATE.toFloat()) }
+            val lastPartial = Array(recs.size) { "" }
+            val changedAt = LongArray(recs.size)
+
             rec.startRecording()
 
             val buf = ShortArray(2048)
-            var wakeAt = 0L
-            while (wantListening) {
+            while (wantListening && heard == null) {
                 val n = rec.read(buf, 0, buf.size)
                 if (n < 0) break
                 if (n == 0) continue
-                if (rc.acceptWaveForm(buf, n)) {
-                    val text = JSONObject(rc.result).optString("text")
-                    if (DEBUG && text.isNotBlank()) sayFromAnyThread("सुना: $text", 2500)
-                    if (text.isNotBlank() && isWake(text)) {
-                        heard = text
-                        break
-                    }
-                    wakeAt = 0L
-                } else {
-                    val p = JSONObject(rc.partialResult).optString("partial")
-                    if (p.isNotBlank() && isWake(p)) {
-                        val now = System.currentTimeMillis()
-                        if (wakeAt == 0L) wakeAt = now
-                        if (now - wakeAt > 1200) {
+                val now = System.currentTimeMillis()
+                for (i in recs.indices) {
+                    val r = recs[i]
+                    if (r.acceptWaveForm(buf, n)) {
+                        val text = JSONObject(r.result).optString("text")
+                        lastPartial[i] = ""
+                        if (text.isNotBlank() && findWake(text) >= 0) {
+                            heard = text
+                            break
+                        }
+                    } else {
+                        val p = JSONObject(r.partialResult).optString("partial")
+                        if (p != lastPartial[i]) {
+                            lastPartial[i] = p
+                            changedAt[i] = now
+                        } else if (p.isNotBlank() && findWake(p) >= 0 && now - changedAt[i] > 900) {
                             heard = p
                             break
                         }
@@ -289,9 +321,11 @@ class ListenService : Service() {
                 rec?.release()
             } catch (e: Exception) {
             }
-            try {
-                rc?.close()
-            } catch (e: Exception) {
+            for (r in recs) {
+                try {
+                    r.close()
+                } catch (e: Exception) {
+                }
             }
             voskRunning = false
         }
@@ -304,39 +338,54 @@ class ListenService : Service() {
         }
     }
 
-    // ---------------- भाषा-फ़ाइल (पहली बार डाउनलोड) ----------------
+    // ---------------- भाषा-फ़ाइलें (पहली बार डाउनलोड) ----------------
+
+    private fun isModelReady(name: String): Boolean = File(File(filesDir, name), ".ok").exists()
+
+    private fun prepareModel(name: String): Model {
+        val dir = File(filesDir, name)
+        if (!File(dir, ".ok").exists()) {
+            dir.deleteRecursively()
+            val zip = File(filesDir, "$name.zip")
+            val conn = URL("$MODEL_BASE$name.zip").openConnection() as HttpURLConnection
+            conn.connectTimeout = 15000
+            conn.readTimeout = 30000
+            conn.inputStream.use { input ->
+                FileOutputStream(zip).use { out -> input.copyTo(out) }
+            }
+            unzip(zip, filesDir)
+            zip.delete()
+            File(dir, ".ok").writeText("ok")
+        }
+        return Model(dir.absolutePath)
+    }
 
     private fun loadModelAsync() {
         if (modelLoading) return
         modelLoading = true
         thread(name = "surya-model") {
+            val firstTime = !isModelReady(HI_MODEL) || !isModelReady(EN_MODEL)
             try {
-                val dir = File(filesDir, MODEL_NAME)
-                val okFile = File(dir, ".ok")
-                if (!okFile.exists()) {
-                    sayFromAnyThread("पहली बार हिंदी भाषा-फ़ाइल (लगभग 42 MB) डाउनलोड हो रही है, इंटरनेट चालू रखें…")
-                    dir.deleteRecursively()
-                    val zip = File(filesDir, "$MODEL_NAME.zip")
-                    val conn = URL(MODEL_URL).openConnection() as HttpURLConnection
-                    conn.connectTimeout = 15000
-                    conn.readTimeout = 30000
-                    conn.inputStream.use { input ->
-                        FileOutputStream(zip).use { out -> input.copyTo(out) }
-                    }
-                    unzip(zip, filesDir)
-                    zip.delete()
-                    File(dir, ".ok").writeText("ok")
+                if (firstTime) {
+                    sayFromAnyThread("पहली बार भाषा-फ़ाइलें (हिंदी + अंग्रेज़ी, लगभग 80 MB) डाउनलोड हो रही हैं, इंटरनेट चालू रखें…")
                 }
-                model = Model(dir.absolutePath)
+                val list = mutableListOf<Model>()
+                list.add(prepareModel(HI_MODEL))
+                try {
+                    list.add(prepareModel(EN_MODEL))
+                } catch (e: Exception) {
+                    sayFromAnyThread("अंग्रेज़ी फ़ाइल नहीं मिल पाई, अभी सिर्फ़ हिंदी चलेगी", 3000)
+                }
+                models = list
                 handler.post {
                     modelLoading = false
-                    say("तैयार हूँ! बोलिए: हे सूर्य", 3000)
+                    if (firstTime) say("तैयार हूँ! बोलिए: हे सूर्य / Hey Surya", 3000)
                     startVosk()
                 }
             } catch (e: Exception) {
-                modelLoading = false
-                sayFromAnyThread("भाषा-फ़ाइल नहीं मिल पाई, इंटरनेट देखिए", 4000)
                 handler.post {
+                    modelLoading = false
+                    say("भाषा-फ़ाइल नहीं मिल पाई, इंटरनेट देखिए", 4000)
                     if (wantListening) handler.postDelayed(startRunnable, 30000)
                 }
             }
@@ -364,7 +413,7 @@ class ListenService : Service() {
         }
     }
 
-    // ---------------- "हे सूर्य" सुनने के बाद ----------------
+    // ---------------- वेक फ़्रेज़ सुनने के बाद ----------------
 
     private fun onWake(text: String) {
         if (!wantListening) return
@@ -377,7 +426,7 @@ class ListenService : Service() {
     }
 
     private fun runCommand(command: String, allowRetry: Boolean) {
-        say("सुन रहा हूँ: $command")
+        handler.removeCallbacks(commandTimeout)
         val reply = try {
             SmartCommands.run(applicationContext, command)
         } catch (e: Exception) {
@@ -387,7 +436,7 @@ class ListenService : Service() {
             listenForCommand()
             return
         }
-        say(reply, 3000)
+        if (reply.isNotEmpty()) say(reply, 2500) else SuryaService.instance?.hideBox()
         handler.removeCallbacks(startRunnable)
         handler.postDelayed(startRunnable, 1500)
     }
@@ -408,10 +457,13 @@ class ListenService : Service() {
         val i = Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH)
         i.putExtra(RecognizerIntent.EXTRA_LANGUAGE_MODEL, RecognizerIntent.LANGUAGE_MODEL_FREE_FORM)
         i.putExtra(RecognizerIntent.EXTRA_LANGUAGE, "hi-IN")
+        i.putExtra("android.speech.extra.EXTRA_ADDITIONAL_LANGUAGES", arrayOf("en-IN"))
         i.putExtra(RecognizerIntent.EXTRA_MAX_RESULTS, 3)
         i.putExtra(RecognizerIntent.EXTRA_CALLING_PACKAGE, packageName)
         recognizer = r
         r.startListening(i)
+        handler.removeCallbacks(commandTimeout)
+        handler.postDelayed(commandTimeout, 12000)
     }
 
     private fun destroyRecognizer() {
@@ -428,6 +480,7 @@ class ListenService : Service() {
 
     private fun finishCommandListening(delay: Long) {
         awaitingCommand = false
+        handler.removeCallbacks(commandTimeout)
         destroyRecognizer()
         handler.removeCallbacks(startRunnable)
         handler.postDelayed(startRunnable, delay)
@@ -447,10 +500,10 @@ class ListenService : Service() {
             if (error == SpeechRecognizer.ERROR_INSUFFICIENT_PERMISSIONS) {
                 wantListening = false
                 awaitingCommand = false
+                handler.removeCallbacks(commandTimeout)
                 say("माइक की इजाज़त चाहिए", 3000)
                 return
             }
-            say("सुनाई नहीं दिया", 2000)
             finishCommandListening(1200)
         }
 
@@ -458,6 +511,7 @@ class ListenService : Service() {
             val list = results?.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION)
             val command = list?.firstOrNull()?.lowercase(Locale.getDefault())?.trim()
             awaitingCommand = false
+            handler.removeCallbacks(commandTimeout)
             destroyRecognizer()
             if (command.isNullOrEmpty()) {
                 SuryaService.instance?.hideBox()
