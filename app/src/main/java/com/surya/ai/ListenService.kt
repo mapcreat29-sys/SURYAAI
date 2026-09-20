@@ -217,10 +217,12 @@ class ListenService : Service() {
 
     // ---------------- वेक फ़्रेज़ पहचानना ----------------
 
-    private fun skeleton(s: String): String {
+    // आवाज़ की बनावट: keepH = true हो तो "ह/h" भी गिना जाता है
+    private fun phon(s: String, keepH: Boolean): String {
         val sb = StringBuilder()
         for (ch in s.lowercase(Locale.getDefault())) {
             val m: Char? = when (ch) {
+                'ह', 'h' -> if (keepH) 'h' else null
                 'क', 'ख', 'च', 'छ', 'c', 'q', 'k' -> 'k'
                 'ग', 'घ', 'g' -> 'g'
                 'ज', 'झ', 'j', 'z' -> 'j'
@@ -244,25 +246,52 @@ class ListenService : Service() {
     private fun splitWords(text: String): List<String> =
         text.lowercase(Locale.getDefault()).trim().split(Regex("\\s+")).filter { it.isNotEmpty() }
 
-    // सूर्य, सूर्या, सूरज, सूरिया, सुर्य, शौर्य, surya, suraj, sooriya ...
+    private val suryaExtra = setOf(
+        "सूर", "सूरी", "सुरी", "सूरि", "सेरी", "सूरे", "सुरे",
+        "suri", "soori", "suree", "sooree", "suriya", "sooriya", "soriya", "suria",
+
+    )
+
+    // सूर्य, सूर्या, सूरज, सूरिया, सेरिया, सुर्य, शौर्य, surya, suraj, sooriya ...
     private fun isSuryaWord(w: String): Boolean {
-        val sk = skeleton(w)
+        if (w in suryaExtra) return true
+        val sk = phon(w, false)
         if (sk == "sry" || sk == "srj") return true
         return sk.length in 3..4 && sk.startsWith("sr") && (sk.contains('y') || sk.contains('j'))
     }
 
     private fun suryaLen(words: List<String>, j: Int): Int {
-        if (j >= words.size) return 0
-        if (isSuryaWord(words[j])) return 1
-        if (j + 1 < words.size && isSuryaWord(words[j] + words[j + 1])) return 2
+        for (len in 1..3) {
+            if (j + len > words.size) break
+            if (isSuryaWord(words.subList(j, j + len).joinToString(""))) return len
+        }
         return 0
     }
+
+    private val extraPrefix = setOf(
+        "ए", "ऐ", "अरे", "ओ", "ओए", "oh", "oye", "ay", "aye", "ae", "a"
+    )
+
+    // हे, है, हाय, हेय, hey, hay, hi, hai ... सब "हे" जैसे माने जाएँगे
+    private fun isHeyWord(w: String): Boolean {
+        if (w in heyWords || w in extraPrefix) return true
+        val sk = phon(w, true)
+        return sk == "h" || sk == "hy"
+    }
+
+    // तेज़ बोलने पर जुड़ा हुआ रूप, जैसे "हेसूर्या"
+    private val mergedWake = Regex("^hy?sr[yj]h?$")
 
     // वेक फ़्रेज़ मिले तो उसके बाद वाले शब्द का नंबर लौटाता है, नहीं मिले तो -1
     private fun findWake(text: String): Int {
         val words = splitWords(text)
         for (i in words.indices) {
-            if (words[i] in heyWords) {
+            for (len in 1..3) {
+                if (i + len > words.size) break
+                val joined = words.subList(i, i + len).joinToString("")
+                if (mergedWake.matches(phon(joined, true))) return i + len
+            }
+            if (isHeyWord(words[i])) {
                 val n = suryaLen(words, i + 1)
                 if (n > 0) return i + 1 + n
             }
@@ -307,6 +336,20 @@ class ListenService : Service() {
         voskThread = thread(name = "surya-vosk") { voskLoop(list) }
     }
 
+    // Vosk के नतीजे से सारे संभावित वाक्य निकालना (n-best)
+    private fun resultTexts(json: String): List<String> {
+        val o = JSONObject(json)
+        val arr = o.optJSONArray("alternatives")
+        if (arr != null) {
+            val out = ArrayList<String>()
+            for (k in 0 until arr.length()) {
+                out.add(arr.getJSONObject(k).optString("text"))
+            }
+            return out
+        }
+        return listOf(o.optString("text"))
+    }
+
     private fun voskLoop(list: List<Model>) {
         var rec: AudioRecord? = null
         var recs: List<Recognizer> = emptyList()
@@ -325,13 +368,17 @@ class ListenService : Service() {
             )
             if (rec.state != AudioRecord.STATE_INITIALIZED) throw IllegalStateException("mic busy")
 
-            recs = list.map { Recognizer(it, SAMPLE_RATE.toFloat()) }
+            recs = list.map { m ->
+                val r0 = Recognizer(m, SAMPLE_RATE.toFloat())
+                r0.setMaxAlternatives(4)
+                r0
+            }
             val lastPartial = Array(recs.size) { "" }
             val changedAt = LongArray(recs.size)
 
             rec.startRecording()
 
-            val buf = ShortArray(2048)
+            val buf = ShortArray(1024)
             while (wantListening && heard == null) {
                 val n = rec.read(buf, 0, buf.size)
                 if (n < 0) break
@@ -340,10 +387,11 @@ class ListenService : Service() {
                 for (i in recs.indices) {
                     val r = recs[i]
                     if (r.acceptWaveForm(buf, n)) {
-                        val text = JSONObject(r.result).optString("text")
                         lastPartial[i] = ""
-                        if (text.isNotBlank() && findWake(text) >= 0) {
-                            heard = text
+                        val hit = resultTexts(r.result)
+                            .firstOrNull { it.isNotBlank() && findWake(it) >= 0 }
+                        if (hit != null) {
+                            heard = hit
                             break
                         }
                     } else {
@@ -351,7 +399,7 @@ class ListenService : Service() {
                         if (p != lastPartial[i]) {
                             lastPartial[i] = p
                             changedAt[i] = now
-                        } else if (p.isNotBlank() && findWake(p) >= 0 && now - changedAt[i] > 700) {
+                        } else if (p.isNotBlank() && findWake(p) >= 0 && now - changedAt[i] > 300) {
                             heard = p
                             break
                         }
