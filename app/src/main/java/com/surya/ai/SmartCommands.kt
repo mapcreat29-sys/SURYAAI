@@ -24,22 +24,30 @@ object SmartCommands {
     )
 
     private val stopWords = setOf(
-        "call", "कॉल", "करो", "करना", "लगाओ", "को", "फोन", "फ़ोन",
-        "please", "सूर्या", "surya", "rdx", "hey", "हे"
+        "call", "dial", "कॉल", "करो", "करना", "लगाओ", "को", "फोन", "फ़ोन",
+        "please", "to", "सूर्या", "सूर्य", "सूरज", "surya", "suraj", "rdx", "hey", "हे"
     )
 
     fun run(ctx: Context, raw: String): String {
+        Commands.ok = true
+        Commands.retry = false
         val t = raw.lowercase(Locale.getDefault()).trim()
         if (t.isEmpty()) return ""
 
-        if (t.contains("call") || t.contains("कॉल") || t.contains("फोन करो") || t.contains("फ़ोन करो")) {
+        if (t.contains("call") || t.contains("dial") || t.contains("कॉल") ||
+            t.contains("फोन करो") || t.contains("फ़ोन करो")
+        ) {
             return callSomeone(ctx, t)
         }
 
         val first = Commands.run(ctx, raw)
-        if (first.startsWith("ऐप नहीं मिला") || first == "समझ नहीं आया") {
+        if (Commands.retry) {
             val guess = fuzzyOpen(ctx, t)
-            if (guess != null) return guess
+            if (guess != null) {
+                Commands.ok = true
+                Commands.retry = false
+                return guess
+            }
         }
         return first
     }
@@ -70,10 +78,20 @@ object SmartCommands {
         val name = t.split(" ")
             .filter { it.isNotBlank() && it !in stopWords }
             .joinToString(" ")
-        if (name.isEmpty()) return "किसे कॉल करूँ?"
+        if (name.isEmpty()) {
+            Commands.ok = false
+            return Lang.t(ctx, "किसे कॉल करूँ?", "Whom should I call?")
+        }
 
         val found = findContact(ctx, name)
-            ?: return "कॉन्टैक्ट नहीं मिला (या इजाज़त नहीं दी): $name"
+        if (found == null) {
+            Commands.ok = false
+            return Lang.t(
+                ctx,
+                "कॉन्टैक्ट नहीं मिला (या इजाज़त नहीं दी): $name",
+                "Contact not found (or permission not given): $name"
+            )
+        }
         return dial(ctx, found.second, found.first)
     }
 
@@ -89,9 +107,11 @@ object SmartCommands {
         i.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
         return try {
             c.startActivity(i)
-            if (granted) "कॉल लगा रहा हूँ: $label" else "डायलर खोला: $label"
+            if (granted) Lang.t(ctx, "कॉल लगा रहा हूँ: $label", "Calling: $label")
+            else Lang.t(ctx, "डायलर खोला: $label", "Opened dialer: $label")
         } catch (e: Exception) {
-            "कॉल नहीं लग पाया"
+            Commands.ok = false
+            Lang.t(ctx, "कॉल नहीं लग पाया", "Couldn't place the call")
         }
     }
 
@@ -140,7 +160,7 @@ object SmartCommands {
 
     private fun fuzzyOpen(ctx: Context, t: String): String? {
         var name = t
-        for (w in listOf("open", "ओपन", "खोलिए", "खोलो", "खोल", "चालू", "स्टार्ट", "start", "करो", "please", "सूर्या", "surya", "rdx")) {
+        for (w in listOf("open", "ओपन", "खोलिए", "खोलो", "खोल", "चालू", "स्टार्ट", "start", "करो", "please", "सूर्या", "सूर्य", "सूरज", "surya", "suraj", "rdx")) {
             name = name.replace(w, " ")
         }
         name = name.trim()
@@ -179,7 +199,7 @@ object SmartCommands {
         launch.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
         val c: Context = SuryaService.instance ?: ctx
         c.startActivity(launch)
-        return "खोल रहा हूँ: $bestLabel"
+        return Lang.t(ctx, "खोल रहा हूँ: $bestLabel", "Opening: $bestLabel")
     }
 
     private fun skeleton(s: String): String {
