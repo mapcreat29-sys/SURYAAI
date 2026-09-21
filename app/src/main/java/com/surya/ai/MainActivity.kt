@@ -8,6 +8,7 @@ import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
 import android.provider.Settings
+import android.text.InputType
 import android.view.Gravity
 import android.view.View
 import android.widget.Button
@@ -21,12 +22,14 @@ import androidx.activity.result.contract.ActivityResultContracts
 import androidx.appcompat.app.AppCompatActivity
 import androidx.appcompat.widget.SwitchCompat
 import androidx.core.content.ContextCompat
+import kotlin.concurrent.thread
 
 class MainActivity : AppCompatActivity() {
 
     private lateinit var status: TextView
     private lateinit var output: TextView
     private lateinit var input: EditText
+    private lateinit var keyInput: EditText
     private lateinit var toggle: SwitchCompat
     private var ignoreToggle = false
 
@@ -107,8 +110,8 @@ class MainActivity : AppCompatActivity() {
 
         val hint = TextView(this)
         hint.text = tr(
-            "फ़ोन अनलॉक होने पर बोलो: हे सूर्या / RDX सूर्या, फिर: यूट्यूब खोलो या कॉल मम्मी",
-            "With the phone unlocked, say: Hey Surya / RDX Surya, then: Open YouTube or Call Mom"
+            "फ़ोन अनलॉक होने पर बोलो: हे सूर्या / RDX सूरज। ऐप कहेगा \"हाँ बोलिए\", फिर बोलो: यूट्यूब खोलो या कॉल मम्मी",
+            "With the phone unlocked, say: Hey Surya / RDX Surya. The app says \"Yes, tell me\", then say: Open YouTube or Call Mom"
         )
         hint.textSize = 14f
         hint.setPadding(0, pad, 0, pad)
@@ -129,6 +132,59 @@ class MainActivity : AppCompatActivity() {
         )
         batBtn.setOnClickListener {
             startActivity(Intent(Settings.ACTION_IGNORE_BATTERY_OPTIMIZATION_SETTINGS))
+        }
+
+        // ---------- AI (Gemini) की चाबी ----------
+        val aiLabel = TextView(this)
+        aiLabel.text = tr("AI (Gemini) की चाबी", "AI (Gemini) key")
+        aiLabel.textSize = 15f
+        aiLabel.setPadding(0, pad, 0, 0)
+
+        keyInput = EditText(this)
+        keyInput.hint = tr("यहाँ चाबी चिपकाएँ", "Paste the key here")
+        keyInput.inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_VARIATION_PASSWORD
+        keyInput.setSingleLine(true)
+
+        val saveKeyBtn = Button(this)
+        saveKeyBtn.text = tr("चाबी सेव करो", "Save key")
+        saveKeyBtn.setOnClickListener {
+            val k = keyInput.text.toString().trim()
+            if (k.length < 20) {
+                output.text = tr(
+                    "चाबी छोटी लग रही है, पूरी चाबी चिपकाएँ",
+                    "The key looks too short, paste the full key"
+                )
+            } else {
+                Gemini.saveKey(this, k)
+                keyInput.setText("")
+                output.text = tr("चाबी सेव हो गई ✅", "Key saved ✅")
+                refresh()
+            }
+        }
+
+        val testKeyBtn = Button(this)
+        testKeyBtn.text = tr("AI जाँचो", "Test AI")
+        testKeyBtn.setOnClickListener {
+            output.text = tr("AI से पूछ रहा हूँ...", "Asking the AI...")
+            val app = applicationContext
+            thread {
+                val r = Gemini.ask(app, "Say hello in one short sentence")
+                runOnUiThread {
+                    output.text = if (r.error == null) {
+                        "AI ✅: " + r.text
+                    } else {
+                        "AI ⛔: " + Gemini.errorText(this, r) + "\n" + r.detail
+                    }
+                }
+            }
+        }
+
+        val removeKeyBtn = Button(this)
+        removeKeyBtn.text = tr("चाबी हटाओ", "Remove key")
+        removeKeyBtn.setOnClickListener {
+            Gemini.saveKey(this, "")
+            output.text = tr("चाबी हटा दी गई", "Key removed")
+            refresh()
         }
 
         input = EditText(this)
@@ -155,6 +211,11 @@ class MainActivity : AppCompatActivity() {
         root.addView(hint)
         root.addView(accBtn)
         root.addView(batBtn)
+        root.addView(aiLabel)
+        root.addView(keyInput)
+        root.addView(saveKeyBtn)
+        root.addView(testKeyBtn)
+        root.addView(removeKeyBtn)
         root.addView(input)
         root.addView(sendBtn)
         root.addView(output)
@@ -162,9 +223,7 @@ class MainActivity : AppCompatActivity() {
         val scroll = ScrollView(this)
         scroll.addView(root)
         setContentView(scroll)
-    }
-
-    override fun onResume() {
+    }override fun onResume() {
         super.onResume()
         if (prefs.getBoolean("on", false) && hasMic() && !ListenService.running) {
             startListening()
@@ -243,12 +302,19 @@ class MainActivity : AppCompatActivity() {
         val onTxt = if (on) tr("चालू ✅", "On ✅") else tr("बंद ⛔", "Off ⛔")
         val accTxt = if (acc) tr("चालू ✅", "On ✅")
         else tr("बंद ⛔ (नीचे का बटन दबाकर चालू करो)", "Off ⛔ (tap the button below to turn it on)")
+        val aiTxt = if (Gemini.hasKey(this)) {
+            tr("चाबी सेव है ✅ (…", "Key saved ✅ (…") + Gemini.key(this).takeLast(4) + ")"
+        } else {
+            tr("चाबी नहीं है ⛔", "No key ⛔")
+        }
         var text = tr(
-            "सुनना: $onTxt\nफ़ोन कंट्रोल: $accTxt",
-            "Listening: $onTxt\nPhone control: $accTxt"
+            "सुनना: $onTxt\nफ़ोन कंट्रोल: $accTxt\nAI: $aiTxt",
+            "Listening: $onTxt\nPhone control: $accTxt\nAI: $aiTxt"
         )
         val p = ListenService.progress
         if (p.isNotEmpty()) text += "\n\n$p"
+        val hs = ListenService.lastHeard
+        if (hs.isNotEmpty()) text += "\n\n" + tr("आख़िरी सुना:", "Last heard:") + "\n" + hs
         status.text = text
     }
 }
