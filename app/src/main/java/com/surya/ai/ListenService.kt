@@ -449,7 +449,7 @@ class ListenService : Service() {
             ttsBusy = false
             return
         }
-        say(tr("हाँ बोलिए", "Yes, go ahead"))
+        say(tr("यस बॉस", "Yes boss"))
         speak(tr("हाँ बोलिए", "Yes, tell me"))
     }
 
