@@ -450,7 +450,7 @@ class ListenService : Service() {
             return
         }
         say(tr("यस बॉस", "Yes boss"))
-        speak(tr("हाँ बोलिए", "Yes, tell me"))
+        speak(tr("यस बॉस", "Yes boss"))
     }
 
     private fun voskLoop(list: List<Model>) {
